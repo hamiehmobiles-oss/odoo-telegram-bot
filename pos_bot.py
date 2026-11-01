@@ -1,4 +1,4 @@
-[12:14 am, 02/11/2026] الريس موسى: import static_ffmpeg
+ import static_ffmpeg
 static_ffmpeg.add_paths()
 
 import io
