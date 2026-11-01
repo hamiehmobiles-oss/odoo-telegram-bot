@@ -30,72 +30,6 @@ from telegram.ext import (
 ODOO_URL = os.getenv("ODOO_URL", "https://milana-telecom.odoo.com")
 ODOO_DB = os.getenv("ODOO_DB", "milana-telecom")
 ODOO_USER = os.getenv("ODOO_USER", "nasab0076@gmail.com")
-ODOO_API_KEY = os.getenv("ODOO_API_KEY", "b64b188d94ffضع_باقي_المفتاح_هنا")
-import static_ffmpeg
-static_ffmpeg.add_paths()
-
-import io
-import os
-import re
-import logging
-import time
-import socket
-import xmlrpc.client
-import speech_recognition as sr
-from pydub import AudioSegment
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
-
-# ================= بيانات الاتصال =================
-ODOO_URL = os.getenv("ODOO_URL", "https://milana-telecom.odoo.com")
-ODOO_DB = os.getenv("ODOO_DB", "milana-telecom")
-ODOO_USER = os.getenv("ODOO_USER", "nasab0076@gmail.com")
-ODOO_API_KEY = os.getenv("ODOO_API_KEY", "b64b188d94ff…
-[12:38 am, 02/11/2026] الريس موسى: import static_ffmpeg
-static_ffmpeg.add_paths()
-
-import io
-import os
-import re
-import logging
-import time
-import socket
-import xmlrpc.client
-import speech_recognition as sr
-from pydub import AudioSegment
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
-
-# ================= بيانات الاتصال =================
-ODOO_URL = os.getenv("ODOO_URL", "https://milana-telecom.odoo.com")
-ODOO_DB = os.getenv("ODOO_DB", "milana-telecom")
-ODOO_USER = os.getenv("ODOO_USER", "nasab0076@gmail.com")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "b64b188d94ff9046c83c64a3d3e0e1009b576463_oak")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9041621607:AAE3any_y9v_TjHzloF2U6jvwlqooiw6AOQ")
@@ -604,7 +538,7 @@ async def release_deposit_amount_logic(partner_name: str, amount: float, update:
         logger.error(f"Error release deposit: {e}")
         await update.message.reply_text(f"❌ حدث خطأ أثناء سداد الأمانة: {str(e)}")
 
-# ================= تسجيل وسداد الديون (خالٍ من الأخطاء 100%) =================
+# ================= تسجيل وسداد الديون =================
 async def add_debt_logic(partner_name: str, amount: float, update: Update):
     try:
         p_name = partner_name.strip()
@@ -1233,7 +1167,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         num_m = re.findall(r'(\d+(?:\.\d+)?)', raw_text)
         amt = float(num_m[0]) if num_m else 0.0
         ok, res = transfer_between_journals("GAME", "CSH", amt, f"شحن ألعاب: {raw_text}")
-        await update.message.reply_text(f"✅ تم ترحيل شحن الألعاب بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من رصيد الألعاب: {amt} $\n({res})")
+        await update.message.reply_text(f"✅ تم ترحيل شحن الألعاب بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من رصيد الأندلس: {amt} $\n({res})")
         return
 
     elif state == "WAITING_CASH_IN":
@@ -1357,5 +1291,5 @@ def run_cloud_bot():
             logger.error(f"انقطاع: {e}")
             time.sleep(5)
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     run_cloud_bot()
