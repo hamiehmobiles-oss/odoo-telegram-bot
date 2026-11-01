@@ -1255,5 +1255,5 @@ def run_cloud_bot():
             logger.info("إعادة المحاولة والاتصال التلقائي بعد 5 ثوانٍ...")
             time.sleep(5)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     run_cloud_bot()
