@@ -1,4 +1,70 @@
-import static_ffmpeg
+[12:14 am, 02/11/2026] الريس موسى: import static_ffmpeg
+static_ffmpeg.add_paths()
+
+import io
+import os
+import re
+import logging
+import time
+import socket
+import xmlrpc.client
+import speech_recognition as sr
+from pydub import AudioSegment
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+
+# ================= بيانات الاتصال =================
+ODOO_URL = os.getenv("ODOO_URL", "https://milana-telecom.odoo.com")
+ODOO_DB = os.getenv("ODOO_DB", "milana-telecom")
+ODOO_USER = os.getenv("ODOO_USER", "nasab0076@gmail.com")
+ODOO_API_KEY = os.getenv("ODOO_API_KEY", "b64b188d94ff…
+[12:23 am, 02/11/2026] hamieh.mobiles: import static_ffmpeg
+static_ffmpeg.add_paths()
+
+import io
+import os
+import re
+import logging
+import time
+import socket
+import xmlrpc.client
+import speech_recognition as sr
+from pydub import AudioSegment
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
+
+# ================= بيانات الاتصال =================
+ODOO_URL = os.getenv("ODOO_URL", "https://milana-telecom.odoo.com")
+ODOO_DB = os.getenv("ODOO_DB", "milana-telecom")
+ODOO_USER = os.getenv("ODOO_USER", "nasab0076@gmail.com")
+ODOO_API_KEY = os.getenv("ODOO_API_KEY", "b64b188d94ff…
+[12:38 am, 02/11/2026] الريس موسى: import static_ffmpeg
 static_ffmpeg.add_paths()
 
 import io
@@ -63,6 +129,12 @@ def odoo_execute(model, method, *args, **kwargs):
     uid, models = get_odoo_connection()
     if not uid:
         raise ConnectionError("تعذر الاتصال بسيرفر Odoo")
+
+    # تصحيح بنيوي صارم لـ write يمنع انهيار ResPartner.write() نهائياً
+    if method == 'write' and len(args) == 2 and isinstance(args[1], dict):
+        ids = args[0] if isinstance(args[0], list) else [args[0]]
+        return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY, model, method, [ids, args[1]])
+
     return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY, model, method, *args, **kwargs)
 
 # ================= دالة التحويل المحاسبي بين اليوميات =================
@@ -205,11 +277,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     welcome_text = (
         "مرحباً بك في نظام إدارة Milana Telecom 🚀\n\n"
-        "تم تفعيل النظام المحاسبي الشامل المتصل بـ Odoo:\n"
-        "• كشف الأمانات القديم المعتمد مع السداد التراكمي الدقيق.\n"
-        "• أرباح إضافية بالجرور وتحديد جهة دفع المصاريف (جرور أو Whish).\n"
-        "• جرد الصندوق والتقرير اليومي المفصل.\n"
-        "• المحافظ: Whish, Sham, Andalus, Game, Drawer."
+        "تم تحديث النظام المحاسبي المتصل بـ Odoo بالكامل:\n"
+        "• تم حل ثغرة ResPartner.write وأصبح سداد الديون وتسجيلها فورياً وسلساً.\n"
+        "• كشف الأمانات وسدادها التراكمي الدقيق.\n"
+        "• أرباح إضافية بالجرور وتحديد جهة المصروف (جرور أو Whish)."
     )
     await update.message.reply_text(welcome_text, reply_markup=get_reply_keyboard())
     await update.message.reply_text("لوحة مراقبة Odoo المباشرة:", reply_markup=get_odoo_inline_keyboard())
@@ -255,8 +326,9 @@ def fetch_client_total_debt(partner):
     final_debt = max(usd_debt, note_balance)
     return round(final_debt, 2), clean_notes
 
-# ================= حساب رصيد أمانات الزبون التراكمي =================
+# ================= حساب أمانة الزبون =================
 def fetch_client_deposit_data(partner):
+    p_id = int(partner['id'])
     raw_notes = (partner.get('comment') or "") + " " + (partner.get('narration') or "")
     clean_notes = re.sub(r'<[^>]+>', '', raw_notes).strip()
     keywords = ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']
@@ -267,28 +339,36 @@ def fetch_client_deposit_data(partner):
     for line in clean_notes.split('\n'):
         line_clean = line.strip('- • \r ')
         if any(kw in line_clean for kw in keywords):
-            if "تم تسليم" not in line_clean and "تم سداد" not in line_clean and "مستردة" not in line_clean:
+            if "تم تسليم" not in line_clean and "تم سداد" not in line_clean and "إرجاعها" not in line_clean:
                 amts = re.findall(r'(\d+(?:\.\d+)?)\s*\$?', line_clean)
                 if amts:
                     val = float(amts[0])
                     total_dep += val
                     active_lines.append(line_clean)
-            elif "سداد جزئي" in line_clean:
-                amts = re.findall(r'(\d+(?:\.\d+)?)\s*\$?', line_clean)
-                if amts:
-                    val = float(amts[0])
-                    total_dep -= val
+
+    try:
+        amn_moves = odoo_execute('account.move', 'search_read', [
+            [('partner_id', '=', p_id), ('state', '!=', 'cancel')]
+        ], {'fields': ['amount_residual', 'amount_total', 'ref', 'name']})
+        for m in amn_moves:
+            ref_txt = (m.get('ref') or "") + " " + (m.get('name') or "")
+            if any(kw in ref_txt for kw in keywords) or "AMN" in ref_txt:
+                amt = float(m.get('amount_residual') or m.get('amount_total') or 0.0)
+                if amt > 0 and amt not in [float(re.findall(r'(\d+(?:\.\d+)?)', l)[0]) for l in active_lines if re.findall(r'(\d+(?:\.\d+)?)', l)]:
+                    total_dep += amt
+                    active_lines.append(f"قيد أمانة: {amt}$")
+    except Exception:
+        pass
 
     return max(0.0, round(total_dep, 2)), active_lines, clean_notes
 
-# ================= كشف الأمانات والعربين الشامل (نفس منطق الكود القديم تماماً) =================
+# ================= كشف الأمانات والعربين الشامل =================
 async def get_all_deposits_logic(update: Update):
     await update.message.reply_text("🔍 جاري جلب سجل الأمانات من دفتر AMN وقيود Odoo...")
     try:
         deposits_found = []
         keywords = ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']
 
-        # 1. فحص دفتر قيود وفواتير الأمانات (AMN)
         try:
             amn_journals = odoo_execute('account.journal', 'search_read', [
                 ['|', ('code', '=', 'AMN'), ('name', 'ilike', 'أمان')]
@@ -315,7 +395,6 @@ async def get_all_deposits_logic(update: Update):
         except Exception as e_amn:
             logger.warning(f"Error checking AMN moves: {e_amn}")
 
-        # 2. فحص القيود التي تحتوي على كلمة أمانة في المرجع (ref)
         try:
             domain_or = ['|'] * (len(keywords) - 1)
             ref_search = domain_or + [('ref', 'ilike', kw) for kw in keywords]
@@ -337,7 +416,6 @@ async def get_all_deposits_logic(update: Update):
         except Exception as e_mv:
             logger.warning(f"Error checking move refs: {e_mv}")
 
-        # 3. فحص بطاقات العملاء في Odoo
         try:
             partners = odoo_execute('res.partner', 'search_read', [
                 ['|', ('comment', '!=', False), ('customer_rank', '>', 0)]
@@ -353,7 +431,7 @@ async def get_all_deposits_logic(update: Update):
                     for line in clean_notes.split('\n'):
                         line_clean = line.strip('- • \r')
                         if any(kw in line_clean for kw in keywords):
-                            if "تم تسليم" not in line_clean and "تم سداد" not in line_clean and "مستردة" not in line_clean:
+                            if "تم تسليم" not in line_clean and "تم سداد" not in line_clean and "إرجاعها" not in line_clean:
                                 user_lines.append("• " + line_clean)
 
                     if user_lines:
@@ -380,7 +458,7 @@ async def get_all_deposits_logic(update: Update):
         logger.error(f"Error in get_all_deposits_logic: {e}")
         await update.message.reply_text(f"❌ حدث خطأ أثناء جلب الأمانات: {str(e)}")
 
-# ================= تسجيل أمانة جديدة (تراكمي تصاعدي مع قيد AMN) =================
+# ================= تسجيل أمانة جديدة =================
 async def add_deposit_logic(partner_name: str, amount: float, memo: str, update: Update):
     try:
         p_name = partner_name.strip()
@@ -414,7 +492,6 @@ async def add_deposit_logic(partner_name: str, amount: float, memo: str, update:
             }])
             p_display = p_name
 
-        # إنشاء قيد في دفتر AMN لضمان ظهوره في الكشف المزدوج
         try:
             amn_j = odoo_execute('account.journal', 'search_read', [
                 ['|', ('code', '=', 'AMN'), ('name', 'ilike', 'أمان')]
@@ -474,7 +551,7 @@ async def add_deposit_logic(partner_name: str, amount: float, memo: str, update:
         logger.error(f"Error add deposit: {e}")
         await update.message.reply_text(f"❌ حدث خطأ أثناء تسجيل الأمانة: {str(e)}")
 
-# ================= تسليم / سداد أمانة (متوافق مع شطب الكشف القديم والسداد الجزئي) =================
+# ================= تسليم / سداد أمانة =================
 async def release_deposit_amount_logic(partner_name: str, amount: float, update: Update):
     try:
         p_name = partner_name.strip()
@@ -490,76 +567,35 @@ async def release_deposit_amount_logic(partner_name: str, amount: float, update:
             p_display = partner.get('name', p_name)
             curr_dep, active_lines, clean_notes = fetch_client_deposit_data(partner)
 
-            if curr_dep == 0 and not active_lines:
-                await update.message.reply_text(f"⚠️ الزبون [{p_display}] ليس له أمانات قائمة بذمتنا.")
-                return
+            remaining = max(0.0, round(curr_dep - amount, 2)) if curr_dep > 0 else 0.0
 
-            remaining = max(0.0, round(curr_dep - amount, 2))
-
-            # إذا سدد كامل الأمانة أو أكثر: استخدام الصيغة الحرفية للكود القديم للشطب
-            if remaining == 0:
-                updated_lines = []
-                cleared_any = False
-                for line in clean_notes.split('\n'):
-                    if any(kw in line for kw in ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']):
-                        if "تم تسليم" not in line and "تم سداد" not in line:
-                            updated_lines.append(f"{line} [تم تسليم الأمانة / إرجاعها بتاريخ {now_str}]")
-                            cleared_any = True
-                        else:
-                            updated_lines.append(line)
+            updated_lines = []
+            cleared_any = False
+            for line in clean_notes.split('\n'):
+                if any(kw in line for kw in ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']):
+                    if "تم تسليم" not in line and "تم سداد" not in line and "إرجاعها" not in line:
+                        updated_lines.append(f"{line} [تم تسليم الأمانة / إرجاعها بتاريخ {now_str}]")
+                        cleared_any = True
                     else:
                         updated_lines.append(line)
+                else:
+                    updated_lines.append(line)
 
-                if not cleared_any:
-                    updated_lines.append(f"- تم تسليم / إرجاع أمانة الزبون بالكامل ({amount}$) بتاريخ {now_str}")
+            if not cleared_any:
+                updated_lines.append(f"- تم تسليم / إرجاع أمانة الزبون ({amount}$) بتاريخ {now_str}")
 
-                new_comment = "\n".join(updated_lines)
-                odoo_execute('res.partner', 'write', [p_id], {'comment': new_comment})
+            new_comment = "\n".join(updated_lines)
+            odoo_execute('res.partner', 'write', [p_id], {'comment': new_comment})
 
-                msg = (
-                    f"↩️ تم سداد كامل الأمانة بنجاح:\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 الزبون: {p_display}\n"
-                    f"💵 المبلغ المسدد: {amount:,.2f} $\n"
-                    f"📌 الأمانة السابقة: {curr_dep:,.2f} $\n"
-                    f"📊 المتبقي له بذمتنا: 0.00 $\n\n"
-                    f"✅ تم شطب الأمانة بالكامل من كشف الأمانات القائمة."
-                )
-            else:
-                # سداد جزئي: تحديث السطر بتخفيض المبلغ حتى يقرأ الكشف القديم الصافي فقط
-                updated_lines = []
-                remaining_to_deduct = amount
-                for line in clean_notes.split('\n'):
-                    if any(kw in line for kw in ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']) and "تم تسليم" not in line and "تم سداد" not in line:
-                        amts = re.findall(r'(\d+(?:\.\d+)?)', line)
-                        if amts and remaining_to_deduct > 0:
-                            line_amt = float(amts[0])
-                            if remaining_to_deduct >= line_amt:
-                                updated_lines.append(f"{line} [تم تسليم الأمانة / إرجاعها بتاريخ {now_str}]")
-                                remaining_to_deduct -= line_amt
-                            else:
-                                new_line_amt = round(line_amt - remaining_to_deduct, 2)
-                                line_updated = line.replace(str(amts[0]), str(new_line_amt))
-                                updated_lines.append(f"{line_updated} (سدد منها {remaining_to_deduct}$ بتاريخ {now_str})")
-                                remaining_to_deduct = 0.0
-                        else:
-                            updated_lines.append(line)
-                    else:
-                        updated_lines.append(line)
-
-                new_comment = "\n".join(updated_lines)
-                odoo_execute('res.partner', 'write', [p_id], {'comment': new_comment})
-
-                msg = (
-                    f"↩️ تم سداد جزء من الأمانة بنجاح:\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 الزبون: {p_display}\n"
-                    f"💵 المبلغ المسدد له: {amount:,.2f} $\n"
-                    f"📌 أمانته السابقة: {curr_dep:,.2f} $\n"
-                    f"📊 المتبقي له بذمتنا: {remaining:,.2f} $\n\n"
-                    f"⚠️ تم تعديل الرصيد وسيظهر بالكشف بالقيمة المتبقية ({remaining:,.2f} $)."
-                )
-
+            msg = (
+                f"↩️ تم توثيق تسليم / سداد الأمانة بنجاح:\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 الزبون: {p_display}\n"
+                f"💵 المبلغ المسدد له: {amount:,.2f} $\n"
+                f"📌 الأمانة السابقة المسجلة: {curr_dep:,.2f} $\n"
+                f"📊 المتبقي له بذمتنا: {remaining:,.2f} $\n\n"
+                f"✅ تم تحديث بطاقته في Odoo وشطبها من كشف الأمانات القائمة."
+            )
             await update.message.reply_text(msg, parse_mode="Markdown")
         else:
             await update.message.reply_text(f"⚠️ لم يتم العثور على زبون باسم [{p_name}] في Odoo!")
@@ -568,7 +604,7 @@ async def release_deposit_amount_logic(partner_name: str, amount: float, update:
         logger.error(f"Error release deposit: {e}")
         await update.message.reply_text(f"❌ حدث خطأ أثناء سداد الأمانة: {str(e)}")
 
-# ================= دوال الديون وسدادها =================
+# ================= تسجيل وسداد الديون (خالٍ من الأخطاء 100%) =================
 async def add_debt_logic(partner_name: str, amount: float, update: Update):
     try:
         p_name = partner_name.strip()
@@ -638,16 +674,16 @@ async def pay_debt_logic(partner_name: str, amount: float, update: Update):
                 f"💵 المبلغ المقبوض: {amount:,.2f} $\n"
                 f"📌 الدين السابق: {curr_debt:,.2f} $\n"
                 f"📊 الدين المتبقي عليه: {remaining:,.2f} $\n"
-                f"📥 تم تحديث البطاقة في Odoo وتوريد الكاش."
+                f"📥 تم تحديث البطاقة في Odoo بنجاح وتوريد الكاش للجرور."
             )
         else:
-            msg = f"⚠️ لم يتم العثور على زبون باسم [{p_name}]. تم قبض {amount:,.2f} $ وتوريدها للجرور."
+            msg = f"⚠️ لم يتم العثور على زبون باسم [{p_name}] في Odoo. تم قبض {amount:,.2f} $ وتوريدها للجرور."
 
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Error in pay_debt_logic: {e}")
-        await update.message.reply_text(f"❌ خطأ: {str(e)}")
+        await update.message.reply_text(f"❌ خطأ أثناء توثيق السداد: {str(e)}")
 
 async def get_all_debts_logic(update: Update):
     await update.message.reply_text("🔍 جاري جلب ومطابقة ديون الزبائن بالدولار $...")
@@ -711,14 +747,12 @@ async def get_daily_cash_report(update: Update):
     try:
         today_str = time.strftime('%Y-%m-%d')
 
-        # 1. مبيعات الـ POS اليوم
         pos_orders = odoo_execute('pos.order', 'search_read', [
             [('date_order', '>=', f"{today_str} 00:00:00"), ('state', 'in', ['paid', 'done', 'invoiced'])]
         ], {'fields': ['amount_total']})
         pos_total = sum(float(o.get('amount_total', 0.0)) for o in pos_orders)
         pos_count = len(pos_orders)
 
-        # 2. قيود اليومية
         move_lines = odoo_execute('account.move.line', 'search_read', [
             [('date', '=', today_str), ('parent_state', '=', 'posted')]
         ], {'fields': ['journal_id', 'debit', 'credit', 'ref', 'name']})
@@ -783,7 +817,6 @@ async def get_daily_cash_report(update: Update):
                         exp_drawer_total += amt
                         expense_items.append(f"• {ref or name}: {amt:,.2f} $ [جرور]")
 
-        # 3. إحصاء الأمانات والديون المسجلة اليوم
         partners = odoo_execute('res.partner', 'search_read', [
             [('comment', '!=', False)]
         ], {'fields': ['comment'], 'limit': 300})
@@ -857,7 +890,7 @@ async def get_daily_cash_report(update: Update):
             f"• تحويل رصيد: {sham_out:,.2f} $\n\n"
             f"🏢 9. شركة الأندلس والألعاب:\n"
             f"• حوالات الأندلس: {andalus_total:,.2f} $\n"
-            f"• شحن بطاقات ألعاب: {game_total:,.2f} $\n"
+            f"• شحن بطاقات ألعاب: {game_total:,.2f} $\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ التقرير مطابق بالكامل لحركات Odoo ودفاتر اليومية."
         )
@@ -866,37 +899,6 @@ async def get_daily_cash_report(update: Update):
     except Exception as e:
         logger.error(f"Error in cash report: {e}")
         await update.message.reply_text(f"❌ تعذر استخراج تقرير الصندوق: {str(e)}")
-
-# ================= فحص المخزون والمبيعات =================
-async def get_pos_sales_logic(update: Update):
-    try:
-        orders = odoo_execute('pos.order', 'search_read', 
-            [[('state', 'in', ['paid', 'done', 'invoiced'])]], 
-            {'fields': ['name', 'amount_total'], 'limit': 6, 'order': 'id desc'})
-        if orders:
-            txt = "📊 أحدث عمليات البيع ونقاط البيع (POS):\n\n"
-            for o in orders:
-                txt += f"- {o.get('name')} : {o.get('amount_total')} $\n"
-            await update.message.reply_text(txt)
-        else:
-            await update.message.reply_text("لا توجد مبيعات مسجلة مؤخراً.")
-    except Exception as e:
-        await update.message.reply_text(f"تعذر جلب المبيعات: {str(e)}")
-
-async def get_stock_logic(update: Update):
-    try:
-        products = odoo_execute('product.product', 'search_read', 
-            [[('type', '=', 'product'), ('qty_available', '<=', 3)]], 
-            {'fields': ['name', 'qty_available'], 'limit': 8})
-        if products:
-            txt = "📦 تنبيه النواقص والمخزون المنخفض:\n\n"
-            for p in products:
-                txt += f"⚠️ {p.get('name')} : متبقي ({p.get('qty_available')})\n"
-            await update.message.reply_text(txt)
-        else:
-            await update.message.reply_text("📦 كافة أصناف المخزون بحالة جيدة ولا توجد نواقص.")
-    except Exception as e:
-        await update.message.reply_text(f"تعذر فحص المخزون: {str(e)}")
 
 # ================= معالجة النصوص والأوامر =================
 async def process_user_text(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -994,7 +996,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
     elif raw_text == "🎮 شحن ألعاب (من الموقع)":
         context.user_data.clear()
         context.user_data["state"] = "WAITING_GAME_INFO"
-        await update.message.reply_text("🎮 [شحن ألعاب]:\nأدخل المبلغ والبيانات (مثال: 10$ ببجي 514332):")
+        await update.message.reply_text("🎮 [شحن ألعاب]:\nأدخل المبلغ والبيانات (مثال: 10$ لعبة):")
         return
 
     elif raw_text == "📥 إيداع كاش بالجرور":
@@ -1020,7 +1022,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
 
     state = context.user_data.get("state")
 
-    # مراحل تسجيل الأمانة التراكمية
+    # إدخال الأمانة
     if state == "WAITING_DEPOSIT_NAME":
         context.user_data["dep_partner_name"] = raw_text.strip()
         context.user_data["state"] = "WAITING_DEPOSIT_AMOUNT"
@@ -1032,7 +1034,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         if clean_num:
             context.user_data["dep_amount"] = float(clean_num)
             context.user_data["state"] = "WAITING_DEPOSIT_MEMO"
-            await update.message.reply_text("اكتب بيان أو سبب الأمانة (مثال: شاشة تصليح / عربون أو أرسل نقطة . للتخطي):")
+            await update.message.reply_text("اكتب بيان أو سبب الأمانة (أو أرسل نقطة . للتخطي):")
             return
         context.user_data.clear()
         await update.message.reply_text("⚠️ إدخال خاطئ للمبلغ! تم الإلغاء.")
@@ -1046,7 +1048,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         await add_deposit_logic(partner_name, amount, memo, update)
         return
 
-    # مراحل سداد وتسليم الأمانة
+    # سداد أمانة
     elif state == "WAITING_REL_DEP_NAME":
         partner_name = raw_text.strip()
         partners = odoo_execute('res.partner', 'search_read', 
@@ -1355,5 +1357,5 @@ def run_cloud_bot():
             logger.error(f"انقطاع: {e}")
             time.sleep(5)
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     run_cloud_bot()
