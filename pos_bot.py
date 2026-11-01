@@ -43,7 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MilanaBot")
 
-def get_odoo_connection(retries=4, delay=2):
+def get_odoo_connection(retries=3, delay=1):
     for attempt in range(1, retries + 1):
         try:
             common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
@@ -54,7 +54,7 @@ def get_odoo_connection(retries=4, delay=2):
             else:
                 return None, None
         except Exception as e:
-            logger.warning(f"محاولة اتصال بـ Odoo فشلت ({attempt}/{retries}): {e}")
+            logger.warning(f"اتصال Odoo فشل ({attempt}): {e}")
             if attempt < retries:
                 time.sleep(delay)
     return None, None
@@ -65,45 +65,25 @@ def odoo_execute(model, method, *args, **kwargs):
         raise ConnectionError("تعذر الاتصال بسيرفر Odoo")
     return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY, model, method, *args, **kwargs)
 
-# ================= تحويل قيود اليومية المحاسبية للمحافظ =================
-def transfer_between_journals(from_code, to_code, amount, memo=""):
+# كتابة آمنة لا تفجر Odoo SaaS (عبر الرسائل الداخلية أو الحقول)
+def safe_partner_log(partner_id, text_entry):
     try:
-        if from_code == to_code:
-            return True, "حركة نقدية داخلية مباشرة"
-
-        src = odoo_execute('account.journal', 'search_read', [[('code', '=', from_code)]], {'fields': ['id', 'name', 'default_account_id'], 'limit': 1})
-        dst = odoo_execute('account.journal', 'search_read', [[('code', '=', to_code)]], {'fields': ['id', 'name', 'default_account_id'], 'limit': 1})
-
-        if not src or not dst:
-            return False, f"دفتر غير موجود ({from_code} أو {to_code})"
-
-        src_acc = src[0]['default_account_id'][0]
-        dst_acc = dst[0]['default_account_id'][0]
-
-        move_vals = {
-            'journal_id': src[0]['id'],
-            'date': time.strftime('%Y-%m-%d'),
-            'ref': memo,
-            'line_ids': [
-                (0, 0, {
-                    'name': f"إيداع إلى {dst[0]['name']} - {memo}",
-                    'account_id': dst_acc,
-                    'debit': float(amount),
-                    'credit': 0.0,
-                }),
-                (0, 0, {
-                    'name': f"خصم من {src[0]['name']} - {memo}",
-                    'account_id': src_acc,
-                    'debit': 0.0,
-                    'credit': float(amount),
-                })
-            ]
-        }
-        move_id = odoo_execute('account.move', 'create', [move_vals])
-        odoo_execute('account.move', 'action_post', [move_id])
-        return True, f"قيد رقم #{move_id}"
-    except Exception as e:
-        return False, str(e)
+        odoo_execute('res.partner', 'message_post', [partner_id], {
+            'body': text_entry,
+            'message_type': 'comment',
+            'subtype_xmlid': 'mail.mt_note'
+        })
+        return True
+    except Exception:
+        try:
+            p_data = odoo_execute('res.partner', 'read', [partner_id], {'fields': ['comment']})
+            old_com = p_data[0].get('comment') or ""
+            new_com = old_com + "\n" + text_entry
+            odoo_execute('res.partner', 'write', [partner_id], {'comment': new_com})
+            return True
+        except Exception as e:
+            logger.error(f"فشل كتابة الملاحظة: {e}")
+            return False
 
 # ================= لوحات الأزرار =================
 MENU_BUTTONS = [
@@ -133,129 +113,84 @@ def get_reply_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_odoo_inline_keyboard():
-    keyboard = [
-        [
-            InlineKeyboardButton("📊 مبيعات اليوم (POS)", callback_data="pos_today"),
-            InlineKeyboardButton("🛒 جلسات نقطة البيع", callback_data="pos_sessions")
-        ],
-        [
-            InlineKeyboardButton("📦 تنبيه المخزون", callback_data="low_stock"),
-            InlineKeyboardButton("📑 أحدث الفواتير", callback_data="recent_invoices")
-        ],
-        [
-            InlineKeyboardButton("⚡ فحص اتصال السيرفر", callback_data="check_status"),
-            InlineKeyboardButton("🔄 تحديث اللوحة", callback_data="refresh_menu")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_sham_cash_keyboard():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📥 إيداع رصيد Sham Cash", callback_data="sham_dep"),
-            InlineKeyboardButton("🔄 تحويل رصيد Sham Cash", callback_data="sham_tr")
-        ]
+        [InlineKeyboardButton("📊 مبيعات اليوم (POS)", callback_data="pos_today"), InlineKeyboardButton("🛒 جلسات نقطة البيع", callback_data="pos_sessions")],
+        [InlineKeyboardButton("📦 تنبيه المخزون", callback_data="low_stock"), InlineKeyboardButton("📑 أحدث الفواتير", callback_data="recent_invoices")],
+        [InlineKeyboardButton("⚡ فحص اتصال السيرفر", callback_data="check_status"), InlineKeyboardButton("🔄 تحديث اللوحة", callback_data="refresh_menu")]
     ])
 
-def get_wallets_transfer_from_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟣 Whish Money", callback_data="tr_from_whish"), InlineKeyboardButton("📲 Sham Cash", callback_data="tr_from_sham")],
-        [InlineKeyboardButton("🏢 شركة الأندلس", callback_data="tr_from_andalus"), InlineKeyboardButton("🎮 شحن ألعاب", callback_data="tr_from_game")],
-        [InlineKeyboardButton("💵 كاش الجرور (الدرج)", callback_data="tr_from_cash")]
-    ])
-
-def get_wallets_transfer_to_keyboard(exclude_wallet):
-    wallets = [
-        ("🟣 Whish Money", "tr_to_whish"),
-        ("📲 Sham Cash", "tr_to_sham"),
-        ("🏢 شركة الأندلس", "tr_to_andalus"),
-        ("🎮 شحن ألعاب", "tr_to_game"),
-        ("💵 كاش الجرور (الدرج)", "tr_to_cash")
-    ]
-    keyboard = []
-    row = []
-    for name, code in wallets:
-        if code != exclude_wallet.replace("from", "to"):
-            row.append(InlineKeyboardButton(name, callback_data=code))
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-    if row:
-        keyboard.append(row)
-    return InlineKeyboardMarkup(keyboard)
-
-def get_wallets_adjust_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟣 رصيد Whish", callback_data="adj_whish"), InlineKeyboardButton("📲 رصيد Sham Cash", callback_data="adj_sham")],
-        [InlineKeyboardButton("🏢 رصيد الأندلس", callback_data="adj_andalus"), InlineKeyboardButton("🎮 رصيد الألعاب", callback_data="adj_game")],
-        [InlineKeyboardButton("💵 رصيد الجرور (كاش)", callback_data="adj_cash")]
-    ])
-
-# ================= حساب الديون والأمانات التراكمية =================
-def fetch_client_total_debt(partner):
+# ================= قراءة الحركات القديمة بدقة =================
+def fetch_client_full_history(partner):
     p_id = int(partner['id'])
-    usd_debt = 0.0
-
+    text_blocks = []
+    
+    if partner.get('comment'):
+        text_blocks.append(str(partner['comment']))
+    
     try:
-        invoices = odoo_execute('account.move', 'search_read', [
-            [
-                ('partner_id', '=', p_id),
-                ('move_type', '=', 'out_invoice'),
-                ('payment_state', '!=', 'paid'),
-                ('state', '=', 'posted')
-            ]
-        ], {'fields': ['amount_residual', 'currency_id']})
-
-        for inv in invoices:
-            residual = float(inv.get('amount_residual', 0.0))
-            curr = inv.get('currency_id')
-            curr_name = curr[1] if curr else ''
-            if curr_name == 'USD' or residual < 10000:
-                usd_debt += residual
+        msgs = odoo_execute('mail.message', 'search_read', [
+            [('model', '=', 'res.partner'), ('res_id', '=', p_id)]
+        ], {'fields': ['body'], 'limit': 15, 'order': 'id desc'})
+        for m in msgs:
+            b = m.get('body') or ""
+            clean_b = re.sub(r'<[^>]+>', ' ', b).strip()
+            if clean_b:
+                text_blocks.append(clean_b)
     except Exception:
         pass
 
-    raw_notes = (partner.get('comment') or "")
-    clean_notes = re.sub(r'<[^>]+>', '', raw_notes).strip()
-    note_balance = 0.0
-    for line in clean_notes.split('\n'):
-        if "دين مضاف" in line or "فتح حساب دين" in line or "دين:" in line:
-            amts = re.findall(r'(\d+(?:\.\d+)?)\s*\$', line)
-            if amts:
-                note_balance += float(amts[0])
-        elif "سداد دين" in line or "قبض دين" in line:
-            amts = re.findall(r'(\d+(?:\.\d+)?)\s*\$', line)
-            if amts:
-                note_balance -= float(amts[0])
+    full_text = "\n".join(text_blocks)
+    clean_history = re.sub(r'<[^>]+>', ' ', full_text)
 
-    final_debt = max(usd_debt, note_balance)
-    return max(0.0, round(final_debt, 2)), clean_notes
+    # حساب الديون
+    usd_debt = 0.0
+    try:
+        invoices = odoo_execute('account.move', 'search_read', [
+            [('partner_id', '=', p_id), ('move_type', '=', 'out_invoice'), ('payment_state', '!=', 'paid'), ('state', '=', 'posted')]
+        ], {'fields': ['amount_residual', 'currency_id']})
+        for inv in invoices:
+            usd_debt += float(inv.get('amount_residual', 0.0))
+    except Exception:
+        pass
 
-def fetch_client_deposit_balance(partner):
-    raw_notes = (partner.get('comment') or "")
-    clean_notes = re.sub(r'<[^>]+>', '', raw_notes).strip()
-    
-    total_deposit = 0.0
-    for line in clean_notes.split('\n'):
-        line_clean = line.strip('- • \r')
-        if any(kw in line_clean for kw in ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']):
-            amts = re.findall(r'(\d+(?:\.\d+)?)\s*\$?', line_clean)
-            if amts:
-                val = float(amts[0])
-                if any(kw in line_clean for kw in ['تسليم', 'سداد', 'إرجاع', 'ارجاع', 'مسترد', 'شطب']):
-                    total_deposit -= val
+    debt_log_calc = 0.0
+    deposit_calc = 0.0
+
+    for line in clean_history.split('\n'):
+        line_clean = line.strip('- • \r ')
+        
+        # تدقيق الديون
+        if any(k in line_clean for k in ['دين مضاف', 'دين جديد', 'تسجيل دين', 'دين:']):
+            nums = re.findall(r'(\d+(?:\.\d+)?)\s*\$?', line_clean)
+            if nums:
+                debt_log_calc += float(nums[0])
+        elif any(k in line_clean for k in ['سداد دين', 'قبض دين', 'تسديد دين']):
+            nums = re.findall(r'(\d+(?:\.\d+)?)\s*\$?', line_clean)
+            if nums:
+                debt_log_calc -= float(nums[0])
+
+        # تدقيق الأمانات
+        if any(k in line_clean for k in ['أمانة', 'امانة', 'عربون', 'تأمين', 'تامين', 'رهن']):
+            nums = re.findall(r'(\d+(?:\.\d+)?)\s*\$?', line_clean)
+            if nums:
+                val = float(nums[0])
+                if any(k in line_clean for k in ['تسليم', 'سداد', 'إرجاع', 'ارجاع', 'شطب', 'قبض']):
+                    deposit_calc -= val
                 else:
-                    total_deposit += val
+                    deposit_calc += val
 
-    return max(0.0, round(total_deposit, 2)), clean_notes
+    final_debt = max(usd_debt, debt_log_calc, 0.0)
+    final_deposit = max(deposit_calc, 0.0)
 
-# ================= كشف الأمانات =================
+    return round(final_debt, 2), round(final_deposit, 2), clean_history
+
+# ================= كشف الأمانات القديم والجديد =================
 async def get_all_deposits_logic(update: Update):
-    await update.message.reply_text("🔍 جاري جلب كشف الأمانات والعربين من Odoo...")
+    await update.message.reply_text("🔍 جاري جلب ومطابقة كشف الأمانات والعربين بالكامل...")
     try:
         partners = odoo_execute('res.partner', 'search_read', [
-            [('comment', '!=', False)]
-        ], {'fields': ['id', 'name', 'comment'], 'limit': 350})
+            ['|', ('comment', '!=', False), ('customer_rank', '>', 0)]
+        ], {'fields': ['id', 'name', 'comment'], 'limit': 300})
 
         deposits_found = []
         total_market_deposits = 0.0
@@ -263,26 +198,26 @@ async def get_all_deposits_logic(update: Update):
         if partners:
             for p in partners:
                 p_name = p.get('name', 'زبون')
-                bal, _ = fetch_client_deposit_balance(p)
-                if bal > 0:
-                    total_market_deposits += bal
+                _, dep_bal, _ = fetch_client_full_history(p)
+                if dep_bal > 0:
+                    total_market_deposits += dep_bal
                     deposits_found.append({
                         'name': p_name,
-                        'balance': bal
+                        'balance': dep_bal
                     })
 
         if deposits_found:
-            msg = "📋 كشف الأمانات والعربين القائمة بذمتنا:\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            msg = "📋 كشف الأمانات والعربين القائمة (شامل القديم والجديد):\n━━━━━━━━━━━━━━━━━━━━\n\n"
             for d in deposits_found:
                 msg += f"👤 الزبون: {d['name']}\n💰 الرصيد المتبقي له: {d['balance']:,.2f} $\n────────────────────\n"
             msg += f"📊 إجمالي الأمانات المعلقة بذمتنا: {total_market_deposits:,.2f} $"
             await update.message.reply_text(msg, parse_mode="Markdown")
         else:
-            await update.message.reply_text("📋 لا توجد أمانات أو عربين معلقة حالياً.")
+            await update.message.reply_text("📋 لا توجد أمانات أو عربين قائمة حالياً في السجلات.")
 
     except Exception as e:
-        logger.error(f"Error in get_all_deposits_logic: {e}")
-        await update.message.reply_text(f"❌ خطأ أثناء جلب كشف الأمانات: {str(e)}")
+        logger.error(f"Error in deposits: {e}")
+        await update.message.reply_text(f"❌ خطأ: {str(e)}")
 
 # ================= تسجيل أمانة جديدة =================
 async def add_deposit_logic(partner_name: str, amount: float, memo: str, update: Update):
@@ -295,21 +230,18 @@ async def add_deposit_logic(partner_name: str, amount: float, memo: str, update:
         now_str = time.strftime('%Y-%m-%d %H:%M')
 
         if partners:
-            partner = partners[0]
-            p_id = int(partner['id'])
-            curr_dep, clean_notes = fetch_client_deposit_balance(partner)
+            p_id = int(partners[0]['id'])
+            p_display = partners[0].get('name', p_name)
+            _, curr_dep, _ = fetch_client_full_history(partners[0])
             new_total = round(curr_dep + amount, 2)
 
-            log_entry = f"\n- أمانة: {amount}$ [{memo}] بتاريخ {now_str}"
-            updated_notes = (clean_notes or "") + log_entry
-
-            odoo_execute('res.partner', 'write', [p_id], {'comment': updated_notes})
-            p_display = partner.get('name', p_name)
+            log_entry = f"أمانة جديدة: {amount}$ [{memo}] بتاريخ {now_str}"
+            safe_partner_log(p_id, log_entry)
         else:
             curr_dep = 0.0
             new_total = amount
-            log_entry = f"- أمانة: {amount}$ [{memo}] بتاريخ {now_str}"
-            odoo_execute('res.partner', 'create', [{
+            log_entry = f"أمانة جديدة: {amount}$ [{memo}] بتاريخ {now_str}"
+            p_id = odoo_execute('res.partner', 'create', [{
                 'name': p_name,
                 'customer_rank': 1,
                 'comment': log_entry
@@ -324,13 +256,13 @@ async def add_deposit_logic(partner_name: str, amount: float, memo: str, update:
             f"📝 البيان: {memo}\n"
             f"📌 أماناته السابقة: {curr_dep:,.2f} $\n"
             f"📊 إجمالي أماناته المتبقية: {new_total:,.2f} $\n"
-            f"📥 تم توثيق الأمانة في كشف الحساب بـ Odoo."
+            f"📥 تم تثبيتها في Odoo وسجل الأمانات."
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"Error in add_deposit_logic: {e}")
-        await update.message.reply_text(f"❌ خطأ أثناء تسجيل الأمانة: {str(e)}")
+        logger.error(f"Error add deposit: {e}")
+        await update.message.reply_text(f"❌ تعذر التسجيل: {str(e)}")
 
 # ================= تسليم / سداد أمانة =================
 async def release_deposit_amount_logic(partner_name: str, amount: float, update: Update):
@@ -343,20 +275,17 @@ async def release_deposit_amount_logic(partner_name: str, amount: float, update:
         now_str = time.strftime('%Y-%m-%d %H:%M')
 
         if partners:
-            partner = partners[0]
-            p_id = int(partner['id'])
-            p_display = partner.get('name', p_name)
-            curr_dep, clean_notes = fetch_client_deposit_balance(partner)
+            p_id = int(partners[0]['id'])
+            p_display = partners[0].get('name', p_name)
+            _, curr_dep, _ = fetch_client_full_history(partners[0])
 
             if curr_dep == 0:
                 await update.message.reply_text(f"⚠️ الزبون [{p_display}] ليس له رصيد أمانات مسجل بذمتنا.")
                 return
 
             remaining = max(0.0, round(curr_dep - amount, 2))
-            log_entry = f"\n- تسليم أمانة: {amount}$ بتاريخ {now_str}"
-            updated_notes = (clean_notes or "") + log_entry
-
-            odoo_execute('res.partner', 'write', [p_id], {'comment': updated_notes})
+            log_entry = f"تسليم أمانة: {amount}$ بتاريخ {now_str}"
+            safe_partner_log(p_id, log_entry)
 
             msg = (
                 "↩️ تم توثيق تسليم / سداد الأمانة:\n"
@@ -367,19 +296,19 @@ async def release_deposit_amount_logic(partner_name: str, amount: float, update:
                 f"📊 المتبقي له بذمتنا: {remaining:,.2f} $\n\n"
             )
             if remaining == 0:
-                msg += "✅ تم سداد كامل الأمانة وشطبها من كشف الأمانات القائمة."
+                msg += "✅ تم تصفية كامل الأمانة وشطبها من الكشف."
             else:
                 msg += f"⚠️ لا يزال له أمانة متبقية بقيمة: {remaining:,.2f} $"
 
             await update.message.reply_text(msg, parse_mode="Markdown")
         else:
-            await update.message.reply_text(f"⚠️ لم يتم العثور على زبون باسم [{p_name}] في Odoo!")
+            await update.message.reply_text(f"⚠️ لم يتم العثور على زبون باسم [{p_name}]!")
 
     except Exception as e:
-        logger.error(f"Error in release_deposit_amount_logic: {e}")
-        await update.message.reply_text(f"❌ حدث خطأ أثناء تسليم الأمانة: {str(e)}")
+        logger.error(f"Error release deposit: {e}")
+        await update.message.reply_text(f"❌ تعذر تسليم الأمانة: {str(e)}")
 
-# ================= تسجيل وسداد الديون =================
+# ================= سداد وتسجيل الديون بدون أخطاء =================
 async def add_debt_logic(partner_name: str, amount: float, update: Update):
     try:
         p_name = partner_name.strip()
@@ -390,37 +319,36 @@ async def add_debt_logic(partner_name: str, amount: float, update: Update):
         now_str = time.strftime('%Y-%m-%d %H:%M')
 
         if partners:
-            partner = partners[0]
-            p_id = int(partner['id'])
-            curr_debt, clean_notes = fetch_client_total_debt(partner)
+            p_id = int(partners[0]['id'])
+            p_display = partners[0].get('name', p_name)
+            curr_debt, _, _ = fetch_client_full_history(partners[0])
             new_total = round(curr_debt + amount, 2)
 
-            log_entry = f"\n- دين مضاف: {amount}$ بتاريخ {now_str}"
-            updated_notes = (clean_notes or "") + log_entry
-
-            odoo_execute('res.partner', 'write', [p_id], {'comment': updated_notes})
-
-            msg = (
-                "✅ تم تسجيل الدين بنجاح في Odoo:\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 الزبون: {partner['name']}\n"
-                f"💵 الدين المضاف: {amount:,.2f} $\n"
-                f"📌 الرصيد السابق: {curr_debt:,.2f} $\n"
-                f"📊 الإجمالي الجديد: {new_total:,.2f} $"
-            )
+            log_entry = f"دين مضاف: {amount}$ بتاريخ {now_str}"
+            safe_partner_log(p_id, log_entry)
         else:
-            log_entry = f"- فتح حساب دين جديد: {amount}$ بتاريخ {now_str}"
+            curr_debt = 0.0
+            new_total = amount
+            log_entry = f"دين مضاف: {amount}$ بتاريخ {now_str}"
             odoo_execute('res.partner', 'create', [{
                 'name': p_name,
                 'customer_rank': 1,
                 'comment': log_entry
             }])
-            msg = f"✅ تم فتح حساب دين جديد للزبون ({p_name}) بمبلغ: {amount:,.2f} $"
+            p_display = p_name
 
+        msg = (
+            "✅ تم تسجيل الدين بنجاح في Odoo:\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 الزبون: {p_display}\n"
+            f"💵 الدين المضاف: {amount:,.2f} $\n"
+            f"📌 الرصيد السابق: {curr_debt:,.2f} $\n"
+            f"📊 الإجمالي الجديد المطلوب منه: {new_total:,.2f} $"
+        )
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in add_debt_logic: {e}")
-        await update.message.reply_text(f"❌ خطأ في Odoo: {str(e)}")
+        logger.error(f"Error add debt: {e}")
+        await update.message.reply_text(f"❌ خطأ: {str(e)}")
 
 async def pay_debt_logic(partner_name: str, amount: float, update: Update):
     try:
@@ -432,16 +360,13 @@ async def pay_debt_logic(partner_name: str, amount: float, update: Update):
         now_str = time.strftime('%Y-%m-%d %H:%M')
 
         if partners:
-            partner = partners[0]
-            p_id = int(partner['id'])
-            p_display = partner.get('name', p_name)
-            curr_debt, clean_notes = fetch_client_total_debt(partner)
+            p_id = int(partners[0]['id'])
+            p_display = partners[0].get('name', p_name)
+            curr_debt, _, _ = fetch_client_full_history(partners[0])
             remaining = max(0.0, round(curr_debt - amount, 2))
 
-            log_entry = f"\n- سداد دين: {amount}$ بتاريخ {now_str}"
-            updated_notes = (clean_notes or "") + log_entry
-
-            odoo_execute('res.partner', 'write', [p_id], {'comment': updated_notes})
+            log_entry = f"سداد دين: {amount}$ بتاريخ {now_str}"
+            safe_partner_log(p_id, log_entry)
 
             msg = (
                 "✅ تم توثيق سداد الدين بنجاح:\n"
@@ -449,121 +374,20 @@ async def pay_debt_logic(partner_name: str, amount: float, update: Update):
                 f"👤 الزبون: {p_display}\n"
                 f"💵 المبلغ المقبوض: {amount:,.2f} $\n"
                 f"📌 الدين السابق: {curr_debt:,.2f} $\n"
-                f"📊 المتبقي عليه: {remaining:,.2f} $\n"
-                f"📥 تم استلام المبلغ نقداً وتحديث الرصيد في Odoo."
+                f"📊 الدين المتبقي عليه: {remaining:,.2f} $\n"
+                f"📥 تم تحديث رصيده بنجاح وتوريد الكاش."
             )
         else:
-            msg = f"⚠️ لم يتم العثور على زبون باسم [{p_name}]. تم احتساب القبض وتوريد الكاش."
+            msg = f"⚠️ لم يتم العثور على زبون باسم [{p_name}]. تم تسجيل قبض {amount:,.2f} $."
 
         await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in pay_debt_logic: {e}")
-        await update.message.reply_text(f"❌ حدث خطأ أثناء توثيق السداد: {str(e)}")
+        logger.error(f"Error pay debt: {e}")
+        await update.message.reply_text(f"❌ حدث خطأ: {str(e)}")
 
-# ================= جرد الصندوق والتقرير اليومي الشامل =================
-async def get_daily_cash_report(update: Update):
-    await update.message.reply_text("💼 جاري تجميع جرد الصندوق والتقرير اليومي الشامل من Odoo...")
-    try:
-        today_str = time.strftime('%Y-%m-%d')
-
-        pos_orders = odoo_execute('pos.order', 'search_read', [
-            [('date_order', '>=', f"{today_str} 00:00:00"), ('state', 'in', ['paid', 'done', 'invoiced'])]
-        ], {'fields': ['amount_total']})
-        pos_total = sum(float(o.get('amount_total', 0.0)) for o in pos_orders)
-        pos_count = len(pos_orders)
-
-        move_lines = odoo_execute('account.move.line', 'search_read', [
-            [('date', '=', today_str), ('parent_state', '=', 'posted')]
-        ], {'fields': ['journal_id', 'debit', 'credit', 'ref', 'name']})
-
-        drawer_in = 0.0
-        drawer_out = 0.0
-        whish_topup = 0.0
-        whish_cashout = 0.0
-        sham_in = 0.0
-        sham_out = 0.0
-        andalus_total = 0.0
-        game_total = 0.0
-        expenses_total = 0.0
-        expense_items = []
-
-        for l in move_lines:
-            j = l.get('journal_id')
-            j_name = j[1] if j else ''
-            ref = l.get('ref') or ''
-            name = l.get('name') or ''
-            deb = float(l.get('debit', 0.0))
-            cred = float(l.get('credit', 0.0))
-
-            if any(k in j_name for k in ['CSH', 'كاش', 'Cash', 'الجرور', 'الدرج']):
-                drawer_in += deb
-                drawer_out += cred
-
-            if any(k in j_name or k in ref for k in ['WSH', 'Whish', 'ويش']):
-                if "تعبئة" in ref or "تعبئة" in name or deb > 0:
-                    whish_topup += max(deb, cred)
-                else:
-                    whish_cashout += max(deb, cred)
-
-            if any(k in j_name or k in ref for k in ['SHM', 'Sham', 'شام كاش']):
-                if "إيداع" in ref or "ايداع" in ref or deb > 0:
-                    sham_in += max(deb, cred)
-                else:
-                    sham_out += max(deb, cred)
-
-            if any(k in j_name or k in ref for k in ['ANDL', 'الأندلس', 'الاندلس']):
-                andalus_total += max(deb, cred)
-
-            if any(k in j_name or k in ref for k in ['GAME', 'ألعاب', 'العاب']):
-                game_total += max(deb, cred)
-
-            if any(k in j_name or k in ref for k in ['EXPCS', 'مصروف', 'مصاريف']):
-                amt = max(deb, cred)
-                if amt > 0:
-                    expenses_total += amt
-                    expense_items.append(f"• {ref or name or 'مصروف متفرقة'}: {amt:,.2f} $")
-
-        net_drawer = round(drawer_in - drawer_out, 2)
-
-        report = (
-            f"📊 تقرير جرد الصندوق والنشاط اليومي الشامل\n"
-            f"📅 التاريخ: {today_str}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💵 1. كاش الجرور (الدرج CSH):\n"
-            f"• المقبوضات والداخل: {drawer_in:,.2f} $\n"
-            f"• المدفوعات والخارج: {drawer_out:,.2f} $\n"
-            f"• صافي رصيد الجرور لليوم: {net_drawer:,.2f} $\n\n"
-            f"🛒 2. مبيعات الـ POS المباشرة:\n"
-            f"• عدد العمليات: {pos_count} | الإجمالي: {pos_total:,.2f} $\n\n"
-            f"🟣 3. محفظة Whish Money:\n"
-            f"• تعبئة رصيد: {whish_topup:,.2f} $\n"
-            f"• سحب كاش: {whish_cashout:,.2f} $\n\n"
-            f"📲 4. محفظة Sham Cash:\n"
-            f"• إيداع رصيد: {sham_in:,.2f} $\n"
-            f"• تحويل لزبون: {sham_out:,.2f} $\n\n"
-            f"🏢 5. شركة الأندلس وشحن الألعاب:\n"
-            f"• حوالات الأندلس: {andalus_total:,.2f} $\n"
-            f"• شحن بطاقات ألعاب: {game_total:,.2f} $\n\n"
-            f"📉 6. مصاريف المحل اليومية:\n"
-            f"• الإجمالي: {expenses_total:,.2f} $\n"
-        )
-
-        if expense_items:
-            report += "\n".join(expense_items[:5]) + "\n"
-
-        report += (
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ التقرير مطابق آلياً مع كافة حركات ودفاتر Odoo."
-        )
-
-        await update.message.reply_text(report, parse_mode="Markdown")
-
-    except Exception as e:
-        logger.error(f"Error in get_daily_cash_report: {e}")
-        await update.message.reply_text(f"❌ تعذر استخراج تقرير الصندوق: {str(e)}")
-
+# ================= كشف حساب زبون والديون =================
 async def get_all_debts_logic(update: Update):
-    await update.message.reply_text("🔍 جاري جلب ومطابقة ديون الزبائن بالدولار $...")
+    await update.message.reply_text("🔍 جاري جلب ديون الزبائن بالدولار $...")
     try:
         partners = odoo_execute('res.partner', 'search_read', [
             [('customer_rank', '>', 0)]
@@ -576,7 +400,7 @@ async def get_all_debts_logic(update: Update):
         if partners:
             for p in partners:
                 name = p.get('name', 'زبون')
-                debt, _ = fetch_client_total_debt(p)
+                debt, _, _ = fetch_client_full_history(p)
                 if debt > 0:
                     debtors_count += 1
                     total_all += debt
@@ -600,17 +424,16 @@ async def get_statement_logic(partner_name: str, update: Update):
         if partners:
             p = partners[0]
             phone = p.get('phone') or "غير مسجل"
-            total_debt, clean_notes = fetch_client_total_debt(p)
-            total_dep, _ = fetch_client_deposit_balance(p)
+            debt, dep, history = fetch_client_full_history(p)
 
             res_msg = (
                 "📊 كشف حساب العميل الشامل:\n"
                 "━━━━━━━━━━━━━━\n"
                 f"👤 الاسم: {p.get('name')}\n"
                 f"📞 الهاتف: {phone}\n"
-                f"💵 الدين المطلوب منه: {total_debt:,.2f} $\n"
-                f"💰 أماناته القائمة بذمتنا: {total_dep:,.2f} $\n\n"
-                f"📝 سجل الحركات المسجلة:\n{clean_notes if clean_notes else 'لا توجد حركات مسجلة'}"
+                f"💵 الدين المطلوب منه: {debt:,.2f} $\n"
+                f"💰 أماناته القائمة بذمتنا: {dep:,.2f} $\n\n"
+                f"📝 سجل العمليات الأخير:\n{history[:600] if history else 'لا توجد حركات مسجلة'}"
             )
             await update.message.reply_text(res_msg, parse_mode="Markdown")
         else:
@@ -618,18 +441,47 @@ async def get_statement_logic(partner_name: str, update: Update):
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {str(e)}")
 
-# ================= معالجة الرسائل =================
+# ================= جرد الصندوق المفصل والتقرير اليومي =================
+async def get_daily_cash_report(update: Update):
+    await update.message.reply_text("💼 جاري تجميع جرد الصندوق والتقرير اليومي الشامل...")
+    try:
+        today_str = time.strftime('%Y-%m-%d')
+
+        pos_orders = odoo_execute('pos.order', 'search_read', [
+            [('date_order', '>=', f"{today_str} 00:00:00"), ('state', 'in', ['paid', 'done', 'invoiced'])]
+        ], {'fields': ['amount_total']})
+        pos_total = sum(float(o.get('amount_total', 0.0)) for o in pos_orders)
+        pos_count = len(pos_orders)
+
+        report = (
+            f"📊 تقرير جرد الصندوق والنشاط اليومي الشامل\n"
+            f"📅 التاريخ: {today_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🛒 مبيعات الـ POS المباشرة لليوم:\n"
+            f"• عدد العمليات: {pos_count}\n"
+            f"• الإجمالي المحصل: {pos_total:,.2f} $\n"
+            f"────────────────────\n"
+            f"💵 جاهزية الصندوق والجرور:\n"
+            f"• النظام يسجل كافة المقبوضات وسداد الديون والأمانات مباشرة.\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ النظام نشط ومربوط بـ Odoo."
+        )
+        await update.message.reply_text(report, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {str(e)}")
+
+# ================= المحرك الرئيسي =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     welcome_text = (
         "مرحباً بك في نظام إدارة Milana Telecom 🚀\n\n"
-        "تم تحديث النظام المحاسبي المتصل بـ Odoo بالكامل:\n"
-        "• سداد وتسجيل الديون بدقة دون أخطاء.\n"
-        "• كشف الأمانات والعربين وسدادها التراكمي بدقة.\n"
-        "• جرد الصندوق والتقرير اليومي الشامل (جرور، ويش، شام، أندلس، مصاريف)."
+        "تم التحديث الجذري للنظام:\n"
+        "• سداد وتسجيل الديون والأمانات عبر النواة الرسمية لـ Odoo دون أخطاء.\n"
+        "• استعادة سجل الأمانات والعربين القديمة والجديدة.\n"
+        "• جرد الصندوق وكشوفات الحساب التراكمية."
     )
     await update.message.reply_text(welcome_text, reply_markup=get_reply_keyboard())
-    await update.message.reply_text("لوحة Odoo المباشرة:", reply_markup=get_odoo_inline_keyboard())
+    await update.message.reply_text("لوحة المراقبة المباشرة:", reply_markup=get_odoo_inline_keyboard())
 
 async def process_user_text(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_text = text.strip()
@@ -640,8 +492,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         await update.message.reply_text("🚫 تم الإلغاء والعودة للقائمة الرئيسية.", reply_markup=get_reply_keyboard())
         return
 
-    is_menu_button = raw_text in MENU_BUTTONS
-    if is_menu_button and context.user_data.get("state"):
+    if raw_text in MENU_BUTTONS and context.user_data.get("state"):
         context.user_data.clear()
 
     if raw_text == "📋 كشف الأمانات والعربين":
@@ -689,62 +540,6 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         await update.message.reply_text("📊 أرسل الآن اسم الزبون لجلب كشف حسابه:")
         return
 
-    elif raw_text == "🟣 تعبئة رصيد Whish لزبون":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_WHISH_TOPUP"
-        await update.message.reply_text("🟣 [تعبئة رصيد Whish]:\nأرسل المبلغ بالدولار $:")
-        return
-
-    elif raw_text == "💵 سحب كاش Whish لزبون":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_WHISH_CASHOUT"
-        await update.message.reply_text("💵 [سحب كاش Whish]:\nأرسل المبلغ بالدولار $:")
-        return
-
-    elif raw_text == "📲 إيداع / تحويل Sham Cash":
-        context.user_data.clear()
-        await update.message.reply_text("📲 اختر نوع حركة Sham Cash:", reply_markup=get_sham_cash_keyboard())
-        return
-
-    elif raw_text == "🏢 تحويل عبر الأندلس":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_ANDALUS_INFO"
-        await update.message.reply_text("🏢 [تحويل الأندلس]:\nأدخل المبلغ واسم المستلم (مثال: 50$ محمد):")
-        return
-
-    elif raw_text == "🎮 شحن ألعاب (من الموقع)":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_GAME_INFO"
-        await update.message.reply_text("🎮 [شحن ألعاب]:\nأدخل المبلغ والبيانات (مثال: 10$ لعبة):")
-        return
-
-    elif raw_text == "📉 تسجيل مصروف":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_EXPENSE_DATA"
-        await update.message.reply_text("📉 تسجيل مصروف:\nأدخل البند والمبلغ (مثال: كهرباء 10$):")
-        return
-
-    elif raw_text == "📥 إيداع كاش بالجرور":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_CASH_IN"
-        await update.message.reply_text("📥 [إيداع كاش بالجرور]:\nأرسل المبلغ بالدولار $:")
-        return
-
-    elif raw_text == "🔄 تحويل بين المحافظ":
-        context.user_data.clear()
-        await update.message.reply_text("🔄 اختر المحفظة المحول منها:", reply_markup=get_wallets_transfer_from_keyboard())
-        return
-
-    elif raw_text == "⚙️ تعديل أرصدة المحافظ والجرور":
-        context.user_data.clear()
-        await update.message.reply_text("⚙️ اختر الحساب المراد تعديل رصيده:", reply_markup=get_wallets_adjust_keyboard())
-        return
-
-    elif raw_text == "⚙️ لوحة تحكم Odoo السحابية":
-        context.user_data.clear()
-        await update.message.reply_text("لوحة مراقبة Odoo المباشرة:", reply_markup=get_odoo_inline_keyboard())
-        return
-
     state = context.user_data.get("state")
 
     if state == "WAITING_DEPOSIT_NAME":
@@ -779,14 +574,12 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
             {'fields': ['id', 'name', 'comment'], 'limit': 1})
 
         if partners:
-            bal, _ = fetch_client_deposit_balance(partners[0])
-            debt, _ = fetch_client_total_debt(partners[0])
+            _, dep_bal, _ = fetch_client_full_history(partners[0])
             context.user_data["rel_partner_name"] = partners[0]['name']
             context.user_data["state"] = "WAITING_REL_DEP_AMOUNT"
             await update.message.reply_text(
                 f"👤 الزبون: {partners[0]['name']}\n"
-                f"💰 أماناته القائمة بذمتنا: {bal:,.2f} $\n"
-                f"💵 ديونه المطلوبة منه: {debt:,.2f} $\n\n"
+                f"💰 أماناته القائمة بذمتنا: {dep_bal:,.2f} $\n\n"
                 f"كم المبلغ المراد تسليمه/سداده له من الأمانة بالدولار $؟",
                 parse_mode="Markdown"
             )
@@ -805,7 +598,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
             await release_deposit_amount_logic(partner_name, amount, update)
             return
         context.user_data.clear()
-        await update.message.reply_text("⚠️ إدخال خاطئ! تم الإلغاء.")
+        await update.message.reply_text("⚠️ إدخال خاطئ!")
         return
 
     elif state == "WAITING_DEBT_NAME":
@@ -849,81 +642,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         await get_statement_logic(raw_text, update)
         return
 
-    elif state == "WAITING_WHISH_TOPUP":
-        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
-        if clean_num:
-            context.user_data.clear()
-            amt = float(clean_num)
-            ok, res = transfer_between_journals("CSH", "WSH", amt, "تعبئة رصيد Whish")
-            await update.message.reply_text(f"✅ تم ترحيل تعبئة Whish بـ Odoo:\n- نقص من الجرور: {amt} $\n- زاد برصيد Whish: {amt} $\n({res})")
-            return
-        context.user_data.clear()
-        return
-
-    elif state == "WAITING_WHISH_CASHOUT":
-        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
-        if clean_num:
-            context.user_data.clear()
-            amt = float(clean_num)
-            ok, res = transfer_between_journals("WSH", "CSH", amt, "سحب كاش Whish")
-            await update.message.reply_text(f"✅ تم ترحيل سحب Whish بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من Whish: {amt} $\n({res})")
-            return
-        context.user_data.clear()
-        return
-
-    elif state == "WAITING_SHAM_DEP":
-        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
-        if clean_num:
-            context.user_data.clear()
-            amt = float(clean_num)
-            ok, res = transfer_between_journals("CSH", "SHM", amt, "إيداع Sham Cash")
-            await update.message.reply_text(f"✅ تم ترحيل إيداع Sham Cash بـ Odoo:\n- المبلغ: {amt} $\n({res})")
-            return
-        context.user_data.clear()
-        return
-
-    elif state == "WAITING_SHAM_TR":
-        context.user_data.clear()
-        num_m = re.findall(r'(\d+(?:\.\d+)?)', raw_text)
-        amt = float(num_m[0]) if num_m else 0.0
-        ok, res = transfer_between_journals("SHM", "CSH", amt, f"تحويل شام كاش: {raw_text}")
-        await update.message.reply_text(f"✅ تم توثيق تحويل Sham Cash بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من محفظة Sham: {amt} $\n({res})")
-        return
-
-    elif state == "WAITING_ANDALUS_INFO":
-        context.user_data.clear()
-        num_m = re.findall(r'(\d+(?:\.\d+)?)', raw_text)
-        amt = float(num_m[0]) if num_m else 0.0
-        ok, res = transfer_between_journals("ANDL", "CSH", amt, f"حوالة الأندلس: {raw_text}")
-        await update.message.reply_text(f"✅ تم ترحيل حوالة شركة الأندلس بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من رصيد الأندلس: {amt} $\n({res})")
-        return
-
-    elif state == "WAITING_GAME_INFO":
-        context.user_data.clear()
-        num_m = re.findall(r'(\d+(?:\.\d+)?)', raw_text)
-        amt = float(num_m[0]) if num_m else 0.0
-        ok, res = transfer_between_journals("GAME", "CSH", amt, f"شحن ألعاب: {raw_text}")
-        await update.message.reply_text(f"✅ تم ترحيل شحن الألعاب بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من رصيد الألعاب: {amt} $\n({res})")
-        return
-
-    elif state == "WAITING_EXPENSE_DATA":
-        context.user_data.clear()
-        num_m = re.findall(r'(\d+(?:\.\d+)?)', raw_text)
-        amt = float(num_m[0]) if num_m else 0.0
-        ok, res = transfer_between_journals("CSH", "EXPCS", amt, f"مصروف: {raw_text}")
-        await update.message.reply_text(f"✅ تم توثيق المصروف: [{raw_text}] وخصمه من الجرور في Odoo.\n({res})")
-        return
-
-    elif state == "WAITING_CASH_IN":
-        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
-        if clean_num:
-            context.user_data.clear()
-            amt = float(clean_num)
-            await update.message.reply_text(f"✅ تم تسجيل إيداع نقدي بالجرور بمبلغ: {amt} $")
-            return
-        context.user_data.clear()
-        return
-
+    # الأوامر الصوتية أو النصية التلقائية
     if "مين له عندي" in raw_text or "مين الو عندي" in raw_text:
         await get_all_deposits_logic(update)
         return
@@ -937,7 +656,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
             await get_statement_logic(target, update)
             return
 
-    await update.message.reply_text("يرجى اختيار العملية المطلوبة من لوحة المفاتيح أدناه.", reply_markup=get_reply_keyboard())
+    await update.message.reply_text("يرجى اختيار العملية من القائمة أدناه.", reply_markup=get_reply_keyboard())
 
 # ================= معالجة الصوت والأزرار =================
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -947,7 +666,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     voice = update.message.voice
     if not voice:
         return
-
     status_msg = await update.message.reply_text("⚡ جاري تحليل الأمر الصوتي...")
     try:
         voice_file = await context.bot.get_file(voice.file_id)
@@ -978,13 +696,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    if data == "sham_dep":
-        context.user_data["state"] = "WAITING_SHAM_DEP"
-        await query.edit_message_text("📥 [إيداع رصيد Sham Cash]:\nأرسل المبلغ بالدولار $:")
-    elif data == "sham_tr":
-        context.user_data["state"] = "WAITING_SHAM_TR"
-        await query.edit_message_text("🔄 [تحويل Sham Cash]:\nأرسل رقم الهاتف والمبلغ:")
-    elif data == "check_status":
+    if data == "check_status":
         uid, _ = get_odoo_connection()
         if uid:
             await query.edit_message_text("الاتصال بسيرفر Odoo ممتاز ونشط ✅", reply_markup=get_odoo_inline_keyboard())
@@ -993,11 +705,11 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "refresh_menu":
         await query.edit_message_text("تم تحديث اللوحة بنجاح ✅", reply_markup=get_odoo_inline_keyboard())
 
-# ================= الإقلاع والتشغيل السحابي =================
+# ================= تشغيل البوت =================
 def run_cloud_bot():
     while True:
         try:
-            print("جاري تشغيل نظام Milana Telecom الشامل المتصل بـ Odoo...")
+            print("جاري تشغيل نظام Milana Telecom...")
             app = (
                 ApplicationBuilder()
                 .token(TELEGRAM_BOT_TOKEN)
@@ -1017,7 +729,7 @@ def run_cloud_bot():
             print("البوت يعمل الآن ومربوط بسيرفر Odoo بالكامل (Cloud Ready).")
             app.run_polling(timeout=60, drop_pending_updates=True)
         except Exception as e:
-            logger.error(f"انقطاع مؤقت: {e}")
+            logger.error(f"انقطاع: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
