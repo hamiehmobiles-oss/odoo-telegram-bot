@@ -31,7 +31,7 @@ ODOO_URL = os.getenv("ODOO_URL", "https://milana-telecom.odoo.com")
 ODOO_DB = os.getenv("ODOO_DB", "milana-telecom")
 ODOO_USER = os.getenv("ODOO_USER", "nasab0076@gmail.com")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "b64b188d94ffضع_باقي_المفتاح_هنا")
-[12:23 am, 02/11/2026] hamieh.mobiles: import static_ffmpeg
+import static_ffmpeg
 static_ffmpeg.add_paths()
 
 import io
