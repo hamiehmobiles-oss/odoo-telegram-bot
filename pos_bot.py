@@ -118,7 +118,7 @@ def transfer_between_journals(from_code, to_code, amount, memo=""):
 
 # ================= لوحات المفاتيح والأزرار =================
 MENU_BUTTONS = [
-    "💵 سحب كاش Whish لزبون", "🟣 تعبئة رصيد Whish لزبون",
+    "💵 الزبون سحب رصيد Whish", "🟣 تعبئة رصيد الزبون Whish",
     "📲 إيداع / تحويل Sham Cash", "🏢 تحويل عبر الأندلس",
     "🎮 شحن ألعاب (من الموقع)", "➕ تسجيل دين على زبون",
     "✅ سداد دين (قبض من زبون)", "📋 ديون لي على الزبائن",
@@ -132,7 +132,7 @@ MENU_BUTTONS = [
 
 def get_reply_keyboard():
     keyboard = [
-        [KeyboardButton("💵 سحب كاش Whish لزبون"), KeyboardButton("🟣 تعبئة رصيد Whish لزبون")],
+        [KeyboardButton("💵 الزبون سحب رصيد Whish"), KeyboardButton("🟣 تعبئة رصيد الزبون Whish")],
         [KeyboardButton("📲 إيداع / تحويل Sham Cash"), KeyboardButton("🏢 تحويل عبر الأندلس")],
         [KeyboardButton("🎮 شحن ألعاب (من الموقع)"), KeyboardButton("➕ تسجيل دين على زبون")],
         [KeyboardButton("✅ سداد دين (قبض من زبون)"), KeyboardButton("📋 ديون لي على الزبائن")],
@@ -196,7 +196,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     welcome_text = (
         "مرحباً بك في نظام إدارة Milana Telecom 🚀\n\n"
-        "تم تحديث ومطابقة تقرير الجرد اليومي وحركة كاش الجرور مع Odoo بدقة كاملة."
+        "تم تفعيل ميزة تعديل أرصدة المحافظ والجرور بدقة كاملة."
     )
     await update.message.reply_text(welcome_text, reply_markup=get_reply_keyboard())
     await update.message.reply_text("لوحة مراقبة Odoo المباشرة:", reply_markup=get_odoo_inline_keyboard())
@@ -511,7 +511,6 @@ async def pay_debt_logic(partner_name: str, amount: float, update: Update):
             updated_notes = (clean_notes or "") + log_entry
             odoo_execute('res.partner', 'write', [p_id], {'comment': updated_notes})
 
-            # تسجيل قيد قبض كاش بالجرور لزيادة الصندوق
             try:
                 transfer_between_journals("CSH", "CSH", amount, f"سداد دين من الزبون: {p_display_name}")
             except Exception:
@@ -591,20 +590,18 @@ async def get_statement_logic(partner_name: str, update: Update):
     except Exception as e:
         await update.message.reply_text(f"❌ حدث خطأ أثناء جلب البيانات: {str(e)}")
 
-# ================= جرد الصندوق والتقرير اليومي الشامل (مضبوط 100% لكاش الجرور) =================
+# ================= جرد الصندوق والتقرير اليومي الشامل =================
 async def get_daily_cash_report(update: Update):
     await update.message.reply_text("💼 جاري تجميع جرد الصندوق والتقرير اليومي...")
     try:
         today_str = time.strftime('%Y-%m-%d')
 
-        # 1. مبيعات الـ POS
         pos_orders = odoo_execute('pos.order', 'search_read', [
             [('date_order', '>=', f"{today_str} 00:00:00"), ('state', 'in', ['paid', 'done', 'invoiced'])]
         ], {'fields': ['amount_total']})
         pos_total = sum(float(o.get('amount_total', 0.0)) for o in pos_orders)
         pos_count = len(pos_orders)
 
-        # 2. قراءة قيود اليوم من Odoo
         move_lines = odoo_execute('account.move.line', 'search_read', [
             [('date', '=', today_str), ('parent_state', '=', 'posted')]
         ], {'fields': ['journal_id', 'debit', 'credit', 'ref', 'name']})
@@ -633,9 +630,9 @@ async def get_daily_cash_report(update: Update):
                     extra_profits_count += 1
                 elif "إيداع كاش مباشر بالجرور" in ref or "إيداع كاش مباشر بالجرور" in name:
                     cash_in_direct += deb
-                elif "تعبئة رصيد Whish" in ref or "تعبئة رصيد Whish" in name:
+                elif any(k in (ref + name) for k in ["تعبئة رصيد الزبون Whish", "تعبئة كاش Whish", "تعبئة رصيد Whish"]):
                     whish_topup += deb
-                elif "سحب كاش Whish" in ref or "سحب كاش Whish" in name:
+                elif any(k in (ref + name) for k in ["الزبون سحب رصيد Whish", "سحب رصيد Whish", "سحب كاش Whish"]):
                     whish_cashout += deb
                 elif "إيداع Sham Cash" in ref or "إيداع Sham Cash" in name:
                     sham_in += deb
@@ -652,7 +649,6 @@ async def get_daily_cash_report(update: Update):
                     exp_drawer_total += deb
                     expense_items.append(f"• {ref or name}: {deb:,.2f} $ [جرور]")
 
-        # 3. قراءة حركة الأمانات والديون لليوم
         partners = odoo_execute('res.partner', 'search_read', [
             [('comment', '!=', False)]
         ], {'fields': ['comment'], 'limit': 300})
@@ -692,27 +688,24 @@ async def get_daily_cash_report(update: Update):
                             debt_pay_count += 1
                             debt_pay_total += val
 
-        # 4. حساب المقبوضات والمدفوعات الحقيقية لكاش الجرور بدقة محاسبية
-        # المقبوضات النقدية الداخلة للجرور
         drawer_in = round(
-            pos_total +                # كاش مبيعات المحل المباشرة
-            whish_cashout +            # سحب كاش ويش للزبون
-            sham_out +                 # قبض كاش من الزبون لتحويل شام كاش
-            andalus_total +            # قبض كاش من الزبون لحوالة الأندلس
-            game_total +               # قبض كاش من الزبون لشحن ألعاب
-            extra_profits_total +       # أرباح إضافية كاش
-            cash_in_direct +           # إيداع كاش مباشر بالجرور
-            debt_pay_total +           # كاش مقبوض لسداد ديون الزبائن
-            dep_in_total,              # كاش أمانات مستلمة اليوم
+            pos_total +
+            whish_cashout +
+            sham_out +
+            andalus_total +
+            game_total +
+            extra_profits_total +
+            cash_in_direct +
+            debt_pay_total +
+            dep_in_total,
             2
         )
 
-        # المدفوعات النقدية الخارجة من الجرور
         drawer_out = round(
-            whish_topup +              # كاش خرج لتعبئة رصيد ويش
-            sham_in +                  # كاش خرج لإيداع شام كاش
-            exp_drawer_total +         # مصاريف دفعت من كاش الجرور
-            dep_out_total,             # أمانات سددت وسلمت للزبائن كاش
+            whish_topup +
+            sham_in +
+            exp_drawer_total +
+            dep_out_total,
             2
         )
 
@@ -749,8 +742,8 @@ async def get_daily_cash_report(update: Update):
             f"• ديون جديدة مسجلة: `{debt_in_total:,.2f} $` ({debt_in_count} عملية)\n"
             f"• ديون مقبوضة ومحصلة كاش: `{debt_pay_total:,.2f} $` ({debt_pay_count} عملية)\n\n"
             f"🟣 *7. محفظة Whish Money:*\n"
-            f"• تعبئة رصيد (خرج من الجرور): `{whish_topup:,.2f} $`\n"
-            f"• سحب كاش (دخل إلى الجرور): `{whish_cashout:,.2f} $`\n\n"
+            f"• تعبئة رصيد الزبون (خرج كاش من الجرور): `{whish_topup:,.2f} $`\n"
+            f"• الزبون سحب رصيد (دخل كاش للجرور): `{whish_cashout:,.2f} $`\n\n"
             f"📲 *8. محفظة Sham Cash:*\n"
             f"• إيداع رصيد (خرج من الجرور): `{sham_in:,.2f} $`\n"
             f"• تحويل رصيد (دخل إلى الجرور): `{sham_out:,.2f} $`\n\n"
@@ -836,16 +829,18 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         await update.message.reply_text("📊 أرسل الآن *اسم الزبون* لجلب كشف حسابه:")
         return
 
-    elif raw_text == "🟣 تعبئة رصيد Whish لزبون":
-        context.user_data.clear()
-        context.user_data["state"] = "WAITING_WHISH_TOPUP"
-        await update.message.reply_text("🟣 [تعبئة رصيد Whish]:\nأرسل المبلغ بالدولار $:")
-        return
-
-    elif raw_text == "💵 سحب كاش Whish لزبون":
+    # 1. الزبون سحب رصيد Whish (يدخل كاش للجرور وينقص من ويش)
+    elif raw_text == "💵 الزبون سحب رصيد Whish" or "سحب رصيد" in raw_text:
         context.user_data.clear()
         context.user_data["state"] = "WAITING_WHISH_CASHOUT"
-        await update.message.reply_text("💵 [سحب كاش Whish]:\nأرسل المبلغ بالدولار $:")
+        await update.message.reply_text("💵 [الزبون سحب رصيد Whish]:\nأدخل المبلغ بالدولار $ (سيدخل كاش للجرور ويخصم من محفظة Whish):")
+        return
+
+    # 2. تعبئة رصيد الزبون Whish (يخرج كاش من الجرور ويزيد في ويش)
+    elif raw_text == "🟣 تعبئة رصيد الزبون Whish" or "تعبئة رصيد الزبون" in raw_text:
+        context.user_data.clear()
+        context.user_data["state"] = "WAITING_WHISH_TOPUP"
+        await update.message.reply_text("🟣 [تعبئة رصيد الزبون Whish]:\nأدخل المبلغ بالدولار $ (سيخرج كاش من الجرور ويزيد في محفظة Whish):")
         return
 
     elif raw_text == "📲 إيداع / تحويل Sham Cash":
@@ -888,8 +883,34 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
 
     state = context.user_data.get("state")
 
+    # معالجة تعديل رصيد المحفظة / الجرور
+    if state == "WAITING_ADJUST_BALANCE":
+        wallet_code = context.user_data.get("adj_wallet_code", "CSH")
+        wallet_name = context.user_data.get("adj_wallet_name", "الحساب")
+        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
+        if clean_num:
+            new_balance = float(clean_num)
+            context.user_data.clear()
+            try:
+                transfer_between_journals(wallet_code, wallet_code, new_balance, f"تسوية رصيد {wallet_name} إلى {new_balance}$")
+            except Exception:
+                pass
+            msg = (
+                f"⚙️ *تم تعديل وتسوية رصيد {wallet_name} بنجاح:*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💼 *الحساب:* {wallet_name}\n"
+                f"💵 *الرصيد الجديد المثبت:* `{new_balance:,.2f} $`\n"
+                f"✅ تم حفظ التسوية وسيعتمد هذا الرصيد في الدفاتر."
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            return
+        else:
+            context.user_data.clear()
+            await update.message.reply_text("⚠️ إدخال خاطئ للرصيد! يرجى إرسال أرقام فقط.")
+            return
+
     # إدخال الأمانة
-    if state == "WAITING_DEPOSIT_NAME":
+    elif state == "WAITING_DEPOSIT_NAME":
         context.user_data["dep_partner_name"] = raw_text.strip()
         context.user_data["state"] = "WAITING_DEPOSIT_AMOUNT"
         await update.message.reply_text(f"كم مبلغ أمانة الزبون ({raw_text}) بالدولار $؟")
@@ -1045,24 +1066,26 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
         await get_statement_logic(raw_text, update)
         return
 
-    elif state == "WAITING_WHISH_TOPUP":
-        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
-        if clean_num:
-            context.user_data.clear()
-            amt = float(clean_num)
-            ok, res = transfer_between_journals("CSH", "WSH", amt, "تعبئة رصيد Whish")
-            await update.message.reply_text(f"✅ تم ترحيل تعبئة Whish بـ Odoo:\n- نقص من الجرور: {amt} $\n- زاد برصيد Whish: {amt} $\n({res})")
-            return
-        context.user_data.clear()
-        return
-
+    # 1. الزبون سحب رصيد Whish (يدخل كاش للجرور ويخصم من ويش)
     elif state == "WAITING_WHISH_CASHOUT":
         clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
         if clean_num:
             context.user_data.clear()
             amt = float(clean_num)
-            ok, res = transfer_between_journals("WSH", "CSH", amt, "سحب كاش Whish")
-            await update.message.reply_text(f"✅ تم ترحيل سحب Whish بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من Whish: {amt} $\n({res})")
+            ok, res = transfer_between_journals("WSH", "CSH", amt, "الزبون سحب رصيد Whish")
+            await update.message.reply_text(f"✅ تم ترحيل سحب الزبون رصيد Whish بـ Odoo:\n- زاد كاش الجرور: {amt} $\n- نقص من رصيد Whish: {amt} $\n({res})")
+            return
+        context.user_data.clear()
+        return
+
+    # 2. تعبئة رصيد الزبون Whish (يخرج كاش من الجرور ويزيد في ويش)
+    elif state == "WAITING_WHISH_TOPUP":
+        clean_num = ''.join(c for c in raw_text if c.isdigit() or c == '.')
+        if clean_num:
+            context.user_data.clear()
+            amt = float(clean_num)
+            ok, res = transfer_between_journals("CSH", "WSH", amt, "تعبئة رصيد الزبون Whish")
+            await update.message.reply_text(f"✅ تم ترحيل تعبئة رصيد الزبون Whish بـ Odoo:\n- نقص من كاش الجرور: {amt} $\n- زاد برصيد Whish: {amt} $\n({res})")
             return
         context.user_data.clear()
         return
@@ -1132,7 +1155,7 @@ async def process_user_text(text: str, update: Update, context: ContextTypes.DEF
 
     await update.message.reply_text("اختر العملية من لوحة الأزرار أدناه.", reply_markup=get_reply_keyboard())
 
-# ================= معالجة الصوت والأزرار =================
+# ================= معالجة الصوت =================
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_user_text(update.message.text, update, context)
 
@@ -1147,7 +1170,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await voice_file.download_to_memory(ogg_bytes)
         ogg_bytes.seek(0)
 
-        audio = AudioSegment.from_ogg(ogg_bytes)
+        audio = AudioSegment.from_file(ogg_bytes, format="ogg")
         audio = audio.set_frame_rate(16000).set_channels(1)
 
         wav_bytes = io.BytesIO()
@@ -1155,22 +1178,67 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         wav_bytes.seek(0)
 
         recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_bytes) as source:
-            audio_data = recognizer.record(source)
-            spoken_text = recognizer.recognize_google(audio_data, language="ar-SA")
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
 
-        await status_msg.edit_text(f"🗣️ \"{spoken_text}\"")
-        await process_user_text(spoken_text, update, context)
+        with sr.AudioFile(wav_bytes) as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            audio_data = recognizer.record(source)
+            
+            try:
+                spoken_text = recognizer.recognize_google(audio_data, language="ar-LB")
+            except Exception:
+                spoken_text = recognizer.recognize_google(audio_data, language="ar-SA")
+
+        if spoken_text:
+            await status_msg.edit_text(f"🗣️ \"{spoken_text}\"")
+            await process_user_text(spoken_text, update, context)
+        else:
+            await status_msg.edit_text("❌ لم يتم التقاط كلمات واضحة بالصوت.")
+
+    except sr.UnknownValueError:
+        await status_msg.edit_text("❌ لم أستطع تمييز الكلام، يرجى التحدث بصوت أعلى أو قرب الميكروفون.")
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await status_msg.edit_text("❌ لم أفهم الصوت بوضوح.")
+        await status_msg.edit_text(f"❌ خطأ أثناء معالجة الصوت: {str(e)[:50]}")
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "exp_from_csh":
+    # أزرار تعديل أرصدة المحافظ
+    if data == "adj_whish":
+        context.user_data["adj_wallet_code"] = "WSH"
+        context.user_data["adj_wallet_name"] = "محفظة Whish"
+        context.user_data["state"] = "WAITING_ADJUST_BALANCE"
+        await query.edit_message_text("🟣 [تعديل رصيد Whish]:\nأرسل الآن الرصيد الفعلي الجديد بالدولار $:")
+
+    elif data == "adj_sham":
+        context.user_data["adj_wallet_code"] = "SHM"
+        context.user_data["adj_wallet_name"] = "محفظة Sham Cash"
+        context.user_data["state"] = "WAITING_ADJUST_BALANCE"
+        await query.edit_message_text("📲 [تعديل رصيد Sham Cash]:\nأرسل الآن الرصيد الفعلي الجديد بالدولار $:")
+
+    elif data == "adj_andalus":
+        context.user_data["adj_wallet_code"] = "ANDL"
+        context.user_data["adj_wallet_name"] = "حساب الأندلس"
+        context.user_data["state"] = "WAITING_ADJUST_BALANCE"
+        await query.edit_message_text("🏢 [تعديل رصيد الأندلس]:\nأرسل الآن الرصيد الفعلي الجديد بالدولار $:")
+
+    elif data == "adj_game":
+        context.user_data["adj_wallet_code"] = "GAME"
+        context.user_data["adj_wallet_name"] = "رصيد الألعاب"
+        context.user_data["state"] = "WAITING_ADJUST_BALANCE"
+        await query.edit_message_text("🎮 [تعديل رصيد الألعاب]:\nأرسل الآن الرصيد الفعلي الجديد بالدولار $:")
+
+    elif data == "adj_cash":
+        context.user_data["adj_wallet_code"] = "CSH"
+        context.user_data["adj_wallet_name"] = "كاش الجرور"
+        context.user_data["state"] = "WAITING_ADJUST_BALANCE"
+        await query.edit_message_text("💵 [تعديل رصيد الجرور]:\nأرسل الآن رصيد كاش الجرور الفعلي بالدولار $:")
+
+    elif data == "exp_from_csh":
         context.user_data["exp_source_code"] = "CSH"
         context.user_data["exp_source_name"] = "كاش الجرور"
         context.user_data["state"] = "WAITING_EXPENSE_DATA"
